@@ -58,7 +58,7 @@ jobs:
 
           docker stop cursos-api || true
           docker rm --force cursos-api || true
-          docker run -d -p 8080:8080 --network cursos-net --restart unless-stopped \
+          docker run -d -p 8081:8080 --network cursos-net --restart unless-stopped \
             -e DB_HOST=pg-cursos \
             -e DB_USER=${{ secrets.DB_USER }} \
             -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
