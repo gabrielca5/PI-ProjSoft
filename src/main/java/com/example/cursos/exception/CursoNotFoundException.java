@@ -1,7 +1,7 @@
 package com.example.cursos.exception;
 
-public class CursoNotFoundException extends RuntimeException {
+public class CursoNotFoundException extends RecursoNotFoundException {
     public CursoNotFoundException(Long id) {
-        super("Curso não encontrado: " + id);
+        super("Curso", id);
     }
 }

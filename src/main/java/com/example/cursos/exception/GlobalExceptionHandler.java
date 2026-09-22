@@ -8,8 +8,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    @ExceptionHandler(CursoNotFoundException.class)
-    public ResponseEntity<String> handleNotFound(CursoNotFoundException ex) {
+    @ExceptionHandler(RecursoNotFoundException.class)
+    public ResponseEntity<String> handleNotFound(RecursoNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
     }
 }

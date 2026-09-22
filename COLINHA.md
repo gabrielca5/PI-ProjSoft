@@ -39,6 +39,231 @@ Outras variações úteis para decorar:
 Nunca usar `deleteById`. Sempre: buscar, marcar `deletado = true`, `save`.
 O `GET` e qualquer query de listagem devem sempre filtrar `deletadoFalse`.
 
+## Validator dedicado + exceção de regra de negócio (400)
+
+O `@NotBlank`/`@NotNull` no DTO só valida **formato** (campo vazio, nulo).
+Regra de **negócio** (carga horária não pode ser zero, preço não pode ser
+negativo, data não pode ser no passado, etc.) não dá pra expressar com
+anotação simples — vira uma classe `Validator` própria, chamada pelo service
+antes de persistir. É o padrão que o `ValidadorPagamento` usava no projeto
+de referência.
+
+### A exceção (distinta da de "não encontrado")
+
+```java
+package com.example.cursos.exception;
+
+public class RegraDeNegocioException extends RuntimeException {
+    public RegraDeNegocioException(String mensagem) {
+        super(mensagem);
+    }
+}
+```
+
+```java
+// no GlobalExceptionHandler, além do handler de RecursoNotFoundException:
+@ExceptionHandler(RegraDeNegocioException.class)
+public ResponseEntity<String> handleRegraNegocio(RegraDeNegocioException ex) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
+}
+```
+
+**Por que duas exceções diferentes**: "não encontrado" é sempre 404 (o
+recurso não existe); "regra de negócio violada" é sempre 400 (o cliente
+mandou um dado que existe e tem o formato certo, mas não é permitido). Já
+que o único par gate/DTO da app hoje é 100%/404, se sua prova pedir uma regra
+tipo "carga horária mínima" ou "não pode matricular aluno duplicado", é aqui
+que ela entra — **não** dentro do `@RestControllerAdvice` genérico e **não**
+como `IllegalArgumentException` solta (perde o status HTTP correto).
+
+### O Validator
+
+```java
+package com.example.cursos.validator;
+
+import com.example.cursos.dto.CursoRequestDTO;
+import com.example.cursos.exception.RegraDeNegocioException;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ValidadorCurso {
+
+    public void validar(CursoRequestDTO dto) {
+        if (dto.getCargaHoraria() != null && dto.getCargaHoraria() <= 0) {
+            throw new RegraDeNegocioException("Carga horária deve ser maior que zero");
+        }
+        if (dto.getPreco() != null && dto.getPreco().signum() < 0) {
+            throw new RegraDeNegocioException("Preço não pode ser negativo");
+        }
+    }
+}
+```
+
+### Como plugar no service
+
+```java
+@Service
+public class CursoService {
+
+    private final CursoRepository cursoRepository;
+    private final ValidadorCurso validadorCurso;
+
+    public CursoService(CursoRepository cursoRepository, ValidadorCurso validadorCurso) {
+        this.cursoRepository = cursoRepository;
+        this.validadorCurso = validadorCurso;
+    }
+
+    public Curso criar(CursoRequestDTO dto) {
+        validadorCurso.validar(dto);
+        Curso curso = new Curso(dto.getNome(), dto.getDescricao(), dto.getCargaHoraria(), dto.getPreco());
+        return cursoRepository.save(curso);
+    }
+}
+```
+
+Chama o validator **antes** de montar a entidade — se a regra falhar, não
+gasta trabalho construindo objeto que não vai ser salvo.
+
+### Testando
+
+```java
+@Test
+void criar_comCargaHorariaZero_lancaExcecao() {
+    CursoRequestDTO dto = new CursoRequestDTO();
+    dto.setCargaHoraria(0);
+
+    assertThatThrownBy(() -> validadorCurso.validar(dto))
+            .isInstanceOf(RegraDeNegocioException.class)
+            .hasMessageContaining("Carga horária");
+}
+```
+
+## Enum em entidade JPA
+
+Usado quando um campo só pode assumir um conjunto fixo de valores (tipo,
+status, categoria) — no `pagamento` era `TipoPagamento` (`PIX`, `BOLETO`,
+`CREDITO`), o mesmo enum que a Factory usava pra escolher o `Processador`.
+
+```java
+package com.example.cursos.model;
+
+public enum TipoCurso {
+    PRESENCIAL, EAD, HIBRIDO
+}
+```
+
+```java
+@Entity
+public class Curso {
+    // ...
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private TipoCurso tipo;
+}
+```
+
+**Sempre `EnumType.STRING`, nunca `ORDINAL`**: `ORDINAL` salva o **índice**
+(0, 1, 2...) no banco — se alguém reordenar os valores do enum depois (ou
+inserir um no meio), os dados antigos passam a apontar pro valor errado sem
+dar erro nenhum. `STRING` salva o nome (`"PRESENCIAL"`), mais verboso no
+banco mas impossível de corromper por reordenação.
+
+No DTO de request, o campo é do tipo enum também (`private TipoCurso tipo`)
+— Jackson já desserializa a string do JSON (`"tipo": "EAD"`) automaticamente,
+sem código extra. Se vier um valor que não existe no enum, Jackson lança
+erro 400 sozinho (nem chega no `@Valid`).
+
+## DTO de resposta (separar o que entra do que sai)
+
+Até agora o `CursoController` devolve a **entidade** (`Curso`) direto no
+corpo da resposta. Funciona, mas mistura o modelo do banco com o contrato da
+API — se quiser esconder um campo interno, evitar problema de serialização
+com relação lazy (como o `@JsonIgnore` que usei em `Materia.curso`), ou
+mudar o formato de saída sem migrar o banco, separa em dois DTOs, como o
+`pagamento` fazia (`PagamentoDto` de entrada, `RespostaPagamentoDto` de
+saída).
+
+```java
+package com.example.cursos.dto;
+
+import com.example.cursos.model.Curso;
+import java.math.BigDecimal;
+
+public class CursoResponseDTO {
+
+    private Long id;
+    private String nome;
+    private Integer cargaHoraria;
+    private BigDecimal preco;
+
+    public static CursoResponseDTO from(Curso curso) {
+        CursoResponseDTO dto = new CursoResponseDTO();
+        dto.id = curso.getId();
+        dto.nome = curso.getNome();
+        dto.cargaHoraria = curso.getCargaHoraria();
+        dto.preco = curso.getPreco();
+        return dto;
+    }
+
+    // getters (sem setters — DTO de saída é só leitura)
+    public Long getId() { return id; }
+    public String getNome() { return nome; }
+    public Integer getCargaHoraria() { return cargaHoraria; }
+    public BigDecimal getPreco() { return preco; }
+}
+```
+
+```java
+@PostMapping
+public ResponseEntity<CursoResponseDTO> criar(@Valid @RequestBody CursoRequestDTO dto) {
+    Curso criado = cursoService.criar(dto);
+    return ResponseEntity.status(HttpStatus.CREATED).body(CursoResponseDTO.from(criado));
+}
+```
+
+**Quando vale a pena**: se o enunciado pedir explicitamente "a resposta deve
+conter apenas X e Y" ou "não deve expor o campo Z", ou se a entidade tiver
+relação lazy que quebra ao serializar direto (`LazyInitializationException`
+fora de uma sessão aberta). Se não tiver nada disso, devolver a entidade
+direto (como o projeto faz hoje) é mais rápido de escrever e válido pra
+prova — não precisa desse DTO extra só por "boa prática" se o enunciado não
+pedir.
+
+## Lombok (opcional — não usado neste projeto)
+
+O `pagamento` de referência usa Lombok (`@Getter`, `@Setter`, dependência
+`org.projectlombok:lombok` com `optional=true` + `annotationProcessorPaths`
+no `maven-compiler-plugin`) pra não escrever getter/setter na mão. Aqui
+escrevi tudo manual de propósito — mais previsível sob pressão de prova
+(sem "mágica" de annotation processor pra debugar se der erro estranho de
+compilação). Se quiser usar Lombok mesmo assim:
+
+```xml
+<dependency>
+    <groupId>org.projectlombok</groupId>
+    <artifactId>lombok</artifactId>
+    <optional>true</optional>
+</dependency>
+```
+
+```java
+@Entity
+@Getter
+@Setter
+@NoArgsConstructor
+public class Curso {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String nome;
+    // sem getters/setters escritos — Lombok gera em tempo de compilação
+}
+```
+
+Menos código, mas se o build der erro de "cannot find symbol" num getter que
+deveria existir, o primeiro suspeito é o annotation processor não estar
+configurado certo no `pom.xml` — perde mais tempo debugando isso do que
+escreveria os getters na mão, no tempo de uma prova.
+
 ## Como criar um teste unitário do service (Mockito)
 
 Onde: `src/test/java/<mesmo pacote do service>/<Entidade>ServiceTest.java`

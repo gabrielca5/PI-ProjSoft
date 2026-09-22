@@ -193,6 +193,10 @@ deleteByNome(String nome)                         // delete direto (evitar — p
 
 - [ ] `./mvnw clean install` passa local (testes + jacoco)
 - [ ] Rotas testadas manualmente via curl/Postman
+- [ ] Se o enunciado pedir uma collection do Postman: criar coleção manualmente no
+      app (New Collection → Add Request pra cada rota) e usar "Export" — não tem
+      atalho automático configurado neste projeto, é mais rápido montar na mão
+      pra 4-5 rotas do que configurar geração automática
 - [ ] `.gitignore` cobre `.env`, `target/`, `.idea/`
 - [ ] Nenhuma credencial hardcoded em `application.properties` (tudo `${VAR}`)
 - [ ] PR aberto dispara `tests.yml` e passa
