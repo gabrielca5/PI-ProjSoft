@@ -128,8 +128,196 @@ Abrir o PR já dispara `tests.yml`. Só depois do merge em `main` é que `deploy
 ## Comandos Maven (wrapper) que vou precisar
 
 ```bash
-./mvnw test                # só roda os testes
-./mvnw clean install       # testes + build + relatório jacoco (tests/jacoco.xml)
-./mvnw clean package        # gera o jar em target/
-./mvnw spring-boot:run      # roda local
+./mvnw test                          # só roda os testes (precisa do Docker rodando p/ Testcontainers)
+./mvnw test -Dtest=CursoServiceTest  # só uma classe de teste
+./mvnw test -Dtest=CursoServiceTest#deletar_cursoInexistente_lancaExcecao  # só um método
+./mvnw clean install                 # testes + build + relatório jacoco (tests/jacoco.xml)
+./mvnw clean package -DskipTests     # gera o jar em target/ sem rodar teste (deploy usa isso)
+./mvnw spring-boot:run               # roda local (precisa das env vars DB_* setadas)
 ```
+
+Ver cobertura local sem esperar o CI: `./mvnw clean install` e abrir `tests/index.html` no navegador.
+
+## O que mudar pra usar isso numa prova nova (outro domínio)
+
+1. **Renomear o pacote/entidade**: trocar `com.example.cursos` → `com.example.<dominio>`
+   em todos os arquivos (`src/main` e `src/test`), e `Curso` → `<Entidade>`.
+2. **`pom.xml`**: `artifactId` (ex: `cursos-api` → `<dominio>-api`).
+3. **`application.properties`**: nome do banco na URL
+   (`jdbc:postgresql://...:5432/cursos` → `.../<dominio>`).
+4. **`deploy.yml`**: 3 lugares que citam `cursos`:
+   - `POSTGRES_DB=cursos` → `POSTGRES_DB=<dominio>`
+   - `--name cursos-api` → `--name <dominio>-api`
+   - tag da imagem `cursos-api-ci` → `<dominio>-api-ci`
+   - se o nome do container mudar, o `--name pg-cursos` também pode mudar
+     (mas não precisa — pode reaproveitar o mesmo Postgres pra bancos diferentes
+     desde que troque só o `POSTGRES_DB`/nome do banco na URL)
+5. **Porta no host** (`-p 8081:8080` em `deploy.yml`): só mexer se a instância já
+   tiver outra coisa usando aquela porta (ver checklist de troubleshooting abaixo).
+6. **`docker-compose.yml`**: `container_name` e nomes de env var, se quiser manter
+   coerência com o novo domínio — não é obrigatório, só cosmético.
+7. **Secrets do GitHub continuam os mesmos** (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`,
+   `HOST_TEST`, `KEY_TEST`, `DB_USER`, `DB_PASSWORD`) — não precisa recriar.
+
+## Observer Pattern (notificações de evento)
+
+Usado quando uma ação do service precisa "avisar" outras partes do sistema
+(auditoria, e-mail, log) sem o service conhecer os detalhes de cada uma —
+desacopla quem gera o evento de quem reage a ele.
+
+### As peças
+
+```java
+package com.example.cursos.observer;
+
+public interface CursoObserver {
+    void onCursoCriado(Curso curso);
+    void onCursoDeletado(Curso curso);
+}
+```
+
+```java
+package com.example.cursos.observer;
+
+import org.springframework.stereotype.Component;
+import java.util.List;
+
+@Component
+public class CursoObservable {
+
+    private final List<CursoObserver> observers;
+
+    // Spring injeta automaticamente TODOS os beans que implementam CursoObserver
+    public CursoObservable(List<CursoObserver> observers) {
+        this.observers = observers;
+    }
+
+    public void notificarCriado(Curso curso) {
+        observers.forEach(o -> o.onCursoCriado(curso));
+    }
+
+    public void notificarDeletado(Curso curso) {
+        observers.forEach(o -> o.onCursoDeletado(curso));
+    }
+}
+```
+
+```java
+package com.example.cursos.observer;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class AuditLoggerObserver implements CursoObserver {
+
+    @Override
+    public void onCursoCriado(Curso curso) {
+        System.out.println("[AUDIT] curso criado: " + curso.getNome());
+    }
+
+    @Override
+    public void onCursoDeletado(Curso curso) {
+        System.out.println("[AUDIT] curso deletado: " + curso.getId());
+    }
+}
+```
+
+Outro observer (ex: `EmailNotifierObserver`) implementa a mesma interface —
+Spring injeta os dois na lista do `CursoObservable` automaticamente, sem
+precisar registrar nada manualmente.
+
+### Como plugar no service
+
+```java
+@Service
+public class CursoService {
+
+    private final CursoRepository cursoRepository;
+    private final CursoObservable cursoObservable;
+
+    public CursoService(CursoRepository cursoRepository, CursoObservable cursoObservable) {
+        this.cursoRepository = cursoRepository;
+        this.cursoObservable = cursoObservable;
+    }
+
+    public Curso criar(CursoRequestDTO dto) {
+        Curso salvo = cursoRepository.save(new Curso(dto.getNome(), dto.getDescricao(), dto.getCargaHoraria(), dto.getPreco()));
+        cursoObservable.notificarCriado(salvo);
+        return salvo;
+    }
+
+    public void deletar(Long id) {
+        Curso curso = cursoRepository.findById(id).orElseThrow(() -> new CursoNotFoundException(id));
+        curso.setDeletado(true);
+        cursoRepository.save(curso);
+        cursoObservable.notificarDeletado(curso);
+    }
+}
+```
+
+### Testando (Mockito)
+
+```java
+@ExtendWith(MockitoExtension.class)
+class CursoServiceTest {
+
+    @Mock private CursoRepository cursoRepository;
+    @Mock private CursoObservable cursoObservable;
+    private CursoService cursoService;
+
+    @BeforeEach
+    void setUp() {
+        cursoService = new CursoService(cursoRepository, cursoObservable);
+    }
+
+    @Test
+    void criar_notificaObservers() {
+        // ... arrange igual aos outros testes
+
+        cursoService.criar(dto);
+
+        verify(cursoObservable).notificarCriado(any(Curso.class));
+    }
+}
+```
+
+Pontos pra lembrar na prova:
+- A **interface** define o contrato (`onXxx`), os **observers concretos**
+  implementam e viram `@Component` (Spring detecta sozinho).
+- O **observable** só conhece a interface, nunca as implementações — é isso
+  que desacopla.
+- Injetar `List<Interface>` no construtor é o jeito idiomático de "registrar"
+  vários observers no Spring, sem precisar de um método `subscribe()` manual.
+- O `service` chama `observable.notificarX(...)` depois da ação principal
+  (save/delete) — nunca antes, senão notifica algo que pode falhar em seguida.
+
+## Debug na instância AWS (SSH)
+
+```bash
+ssh -i projsoft26b.pem ubuntu@3.236.181.241
+
+docker ps -a                      # ver todos os containers (rodando e parados)
+docker logs -f cursos-api         # acompanhar log da aplicação em tempo real
+docker logs --tail 100 pg-cursos  # últimas linhas do log do Postgres
+docker exec -it pg-cursos psql -U <DB_USER> -d cursos   # abrir psql dentro do container
+docker restart cursos-api         # reiniciar sem esperar novo deploy
+docker network inspect cursos-net # ver quais containers estão na rede
+```
+
+### Checklist quando o deploy falha
+
+- **`port is already allocated`** → outra coisa na instância já usa aquela porta
+  (`docker ps -a` pra achar quem). Troca o mapeamento de porta em `deploy.yml`
+  (`-p <nova>:8080`) e libera a porta nova no Security Group da AWS.
+- **`password authentication failed`** → `DB_USER`/`DB_PASSWORD` errados ou
+  o container `pg-cursos` já existia com credenciais antigas antes de trocar os
+  secrets (o Postgres só lê `POSTGRES_USER`/`PASSWORD` na criação do container —
+  se já existe, precisa `docker rm -f pg-cursos` + apagar o volume `pgdata` pra
+  recriar com as credenciais novas: `docker volume rm pgdata`).
+- **`Unable to find image` / erro de login no Docker Hub** → conferir
+  `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (token, não senha) nos secrets.
+- **SSH falha (`Permission denied` ou timeout)** → conferir `HOST_TEST` (IP atual
+  da instância, pode mudar se ela foi reiniciada) e `KEY_TEST` (conteúdo completo
+  do `.pem`, incluindo as linhas `BEGIN`/`END`).
+- **App sobe mas não responde de fora** → porta não liberada no Security Group
+  da instância (Inbound rules → TCP → porta usada → 0.0.0.0/0).
