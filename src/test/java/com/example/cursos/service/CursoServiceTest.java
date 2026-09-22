@@ -41,7 +41,7 @@ class CursoServiceTest {
 
         assertThat(resultado).isEqualTo(esperado);
         verify(cursoRepository).findByDeletadoFalse();
-        verify(cursoRepository, never()).findByDeletadoFalseAndNomeStartingIgnoreCase(any());
+        verify(cursoRepository, never()).findByDeletadoFalseAndNomeStartingWithIgnoreCase(any());
     }
 
     @Test
@@ -56,12 +56,12 @@ class CursoServiceTest {
     @Test
     void listar_comFiltro_retornaCursosQueComecamComOFiltro() {
         List<Curso> esperado = List.of(new Curso("Java Avançado", "desc", 40, BigDecimal.TEN));
-        when(cursoRepository.findByDeletadoFalseAndNomeStartingIgnoreCase("Java")).thenReturn(esperado);
+        when(cursoRepository.findByDeletadoFalseAndNomeStartingWithIgnoreCase("Java")).thenReturn(esperado);
 
         List<Curso> resultado = cursoService.listar("Java");
 
         assertThat(resultado).isEqualTo(esperado);
-        verify(cursoRepository).findByDeletadoFalseAndNomeStartingIgnoreCase("Java");
+        verify(cursoRepository).findByDeletadoFalseAndNomeStartingWithIgnoreCase("Java");
     }
 
     @Test

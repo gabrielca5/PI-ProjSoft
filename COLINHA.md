@@ -1,26 +1,31 @@
 # Colinha — API de cursos (Spring Boot)
 
-Projeto completo funcionando neste diretório. Na prova: copiar a estrutura,
-trocar nome de domínio/entidade e ajustar rotas conforme o enunciado.
+Projeto completo funcionando neste diretório, seguindo o padrão oficial da
+disciplina (baseado no projeto de referência `pagamento`). Na prova: copiar
+a estrutura, trocar nome de domínio/entidade e ajustar rotas conforme o
+enunciado.
 
 ## Estrutura mental (ordem para escrever do zero)
 
-1. `pom.xml` — starters: web, data-jpa, validation, postgresql (runtime), h2 (test), starter-test
+1. `pom.xml` — parent `spring-boot-starter-parent:4.1.0`, Java 25, starters:
+   `data-jpa`, `webmvc`, `validation`, `postgresql` (runtime), `spring-boot-starter-test`,
+   `spring-boot-starter-webmvc-test`, `testcontainers`/`testcontainers-postgresql`/`testcontainers-junit-jupiter`
 2. `model/Curso.java` — entidade JPA, campo `deletado` (boolean, default false)
 3. `repository/CursoRepository.java` — extends `JpaRepository`, query methods derivados
-4. `service/CursoService.java` — regra de negócio, é o que precisa de 100% de cobertura
+4. `service/CursoService.java` — regra de negócio, alvo de cobertura de testes
 5. `controller/CursoController.java` — REST, injeta o service
 6. `exception/` — exceção customizada + `@RestControllerAdvice`
 7. `application.properties` — tudo via `${VAR}` de ambiente, nunca hardcoded
-8. Testes: `*ServiceTest` (Mockito, unitário) + `*IntegrationTest` (`@SpringBootTest` + `MockMvc`)
-9. `.github/workflows/ci-cd.yml` — job `test` (sempre) + job `deploy` (só push em `main`)
+8. Testes: `*ServiceTest` (Mockito, unitário) + `*ControllerIntegrationTest` (`@SpringBootTest` + `@Testcontainers` + `PostgreSQLContainer`)
+9. `.github/workflows/tests.yml` — roda em todo PR, `mvn clean install` + gate de cobertura via `madrapps/jacoco-report` (80%)
+10. `.github/workflows/deploy.yml` — só em push na `main`: builda, publica imagem no Docker Hub e reinicia o container via SSH
 
 ## Filtro "startWith"
 
 Spring Data JPA já resolve por nome de método, sem escrever JPQL:
 
 ```java
-List<Curso> findByDeletadoFalseAndNomeStartingIgnoreCase(String nome);
+List<Curso> findByDeletadoFalseAndNomeStartingWithIgnoreCase(String nome);
 ```
 
 Outras variações úteis para decorar:
@@ -37,17 +42,30 @@ O `GET` e qualquer query de listagem devem sempre filtrar `deletadoFalse`.
 ## application.properties (variáveis de ambiente / secrets)
 
 ```properties
-spring.datasource.url=jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME}
+spring.datasource.url=jdbc:postgresql://${DB_HOST:localhost}:5432/cursos
 spring.datasource.username=${DB_USER}
 spring.datasource.password=${DB_PASSWORD}
 ```
 
-Rodar local exportando as env vars antes (PowerShell):
+## Rodando local
+
+### Banco (Docker)
+
+```bash
+docker run -d --name pg-cursos -e POSTGRES_DB=cursos -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres
+```
+
+### Aplicação (Maven wrapper)
 
 ```powershell
-$env:DB_HOST="localhost"; $env:DB_PORT="5432"; $env:DB_NAME="cursos"
-$env:DB_USER="postgres"; $env:DB_PASSWORD="postgres"
-mvn spring-boot:run
+$env:DB_HOST="localhost"; $env:DB_USER="postgres"; $env:DB_PASSWORD="postgres"
+./mvnw spring-boot:run
+```
+
+### Tudo via docker-compose (app containerizada)
+
+```bash
+DB_USER=postgres DB_PASSWORD=postgres docker compose up --build
 ```
 
 ## Testar as rotas (curl)
@@ -63,51 +81,40 @@ curl -X POST http://localhost:8080/cursos \
 curl -X DELETE http://localhost:8080/cursos/1
 ```
 
-## PostgreSQL na instância AWS (setup rápido)
+## CI/CD — GitHub Actions
 
-```bash
-sudo apt update && sudo apt install -y postgresql
-sudo -u postgres psql -c "CREATE DATABASE cursos;"
-sudo -u postgres psql -c "CREATE USER cursos_user WITH PASSWORD 'senha';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE cursos TO cursos_user;"
-```
+Dois workflows, cada um com sua função (`.github/workflows/`):
 
-Liberar conexão remota se a app rodar fora da instância do banco: editar
-`postgresql.conf` (`listen_addresses = '*'`) e `pg_hba.conf` (adicionar
-`host cursos cursos_user <IP_ORIGEM>/32 md5`), depois `sudo systemctl restart postgresql`.
-Liberar a porta 5432 no Security Group da AWS **apenas** para o IP necessário.
+- **`tests.yml`** — dispara em todo Pull Request pra `main`. Roda `mvn clean install`
+  e usa `madrapps/jacoco-report` pra comentar a cobertura no PR e falhar o build
+  se ficar abaixo de 80%.
+- **`deploy.yml`** — dispara em todo push na `main`. Builda o jar, builda a imagem
+  Docker (`Dockerfile` multi-stage), publica no Docker Hub e reinicia o container
+  na instância via SSH (`docker stop` + `docker run` da imagem nova).
 
-## Deploy do jar no servidor (systemd)
-
-Arquivos de referência em `deploy/`:
-- `cursos-api.service` — unit do systemd, lê `EnvironmentFile=/opt/cursos-api/.env`
-- `env.example` — modelo do `.env` que fica **só no servidor**, nunca no git
-
-```bash
-sudo mkdir -p /opt/cursos-api
-sudo cp deploy/cursos-api.service /etc/systemd/system/cursos-api.service
-sudo cp deploy/env.example /opt/cursos-api/.env   # depois editar com valores reais
-sudo chmod 600 /opt/cursos-api/.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now cursos-api
-```
-
-## GitHub Actions — secrets a cadastrar no repositório
+### Secrets a cadastrar no repositório
 
 `Settings > Secrets and variables > Actions > New repository secret`:
 
-- `AWS_HOST` — IP público da instância
-- `AWS_USER` — usuário SSH (ex: `ubuntu`)
-- `AWS_SSH_KEY` — conteúdo da chave privada `.pem`
+- `DOCKERHUB_USERNAME` — usuário do Docker Hub
+- `DOCKERHUB_TOKEN` — access token do Docker Hub (não a senha)
+- `HOST_TEST` — IP público da instância onde a app roda
+- `KEY_TEST` — conteúdo da chave privada SSH (`.pem`)
+- `DB_USER`, `DB_PASSWORD` — credenciais do Postgres (usadas tanto para subir o
+  container do banco quanto para a app se conectar nele)
 
-O pipeline (`.github/workflows/ci-cd.yml`) tem 2 jobs:
-- `test`: roda em todo push/PR — `mvn -B verify` (testes + gate de 100% de cobertura no service via Jacoco)
-- `deploy`: só roda em push na `main`, depois do `test` passar — builda o jar, copia via SCP e reinicia o serviço via SSH
+### Rede Docker na instância
+
+O `deploy.yml` cria (se ainda não existir) uma rede `cursos-net` e sobe o
+Postgres nela como container `pg-cursos` — só na primeira vez, com volume
+nomeado (`pgdata`) pra persistir os dados entre deploys. A cada push na
+`main`, só o container `cursos-api` é recriado, conectado na mesma rede,
+usando `DB_HOST=pg-cursos` (nome do container resolve como hostname dentro
+da rede — não precisa de IP nem de `localhost`).
 
 ## Fluxo do "criar uma rota via Pull Request"
 
 ```bash
-git init                       # se ainda não for repo
 git checkout -b feat/delete-curso
 # implementar/ajustar a rota (ex: DELETE /cursos/{id})
 git add .
@@ -116,14 +123,13 @@ git push -u origin feat/delete-curso
 gh pr create --title "feat: DELETE /cursos/{id}" --body "Implementa delecao logica" --base main
 ```
 
-Abrir o PR já dispara o job `test` do workflow (trigger `pull_request`).
-Só depois do merge em `main` é que o job `deploy` roda.
+Abrir o PR já dispara `tests.yml`. Só depois do merge em `main` é que `deploy.yml` roda.
 
-## Comandos Maven que vou precisar
+## Comandos Maven (wrapper) que vou precisar
 
 ```bash
-mvn test              # só roda os testes
-mvn verify             # testes + checagem de cobertura (jacoco:check)
-mvn clean package      # gera o jar em target/
-mvn spring-boot:run    # roda local
+./mvnw test                # só roda os testes
+./mvnw clean install       # testes + build + relatório jacoco (tests/jacoco.xml)
+./mvnw clean package        # gera o jar em target/
+./mvnw spring-boot:run      # roda local
 ```

@@ -21,7 +21,7 @@ public class CursoService {
         if (nome == null || nome.isBlank()) {
             return cursoRepository.findByDeletadoFalse();
         }
-        return cursoRepository.findByDeletadoFalseAndNomeStartingIgnoreCase(nome);
+        return cursoRepository.findByDeletadoFalseAndNomeStartingWithIgnoreCase(nome);
     }
 
     public Curso criar(CursoRequestDTO dto) {
