@@ -1,0 +1,15 @@
+# Copiar para /etc/systemd/system/cursos-api.service na instância AWS
+# As variaveis sensiveis ficam em /opt/cursos-api/.env (nunca no git)
+[Unit]
+Description=Cursos API
+After=network.target postgresql.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/cursos-api
+EnvironmentFile=/opt/cursos-api/.env
+ExecStart=/usr/bin/java -jar /opt/cursos-api/cursos-api.jar
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
