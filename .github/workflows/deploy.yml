@@ -62,4 +62,5 @@ jobs:
             -e DB_HOST=pg-cursos \
             -e DB_USER=${{ secrets.DB_USER }} \
             -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
+            -e USERS_API_URL=${{ secrets.USERS_API_URL }} \
             --name cursos-api ${{ secrets.DOCKERHUB_USERNAME }}/cursos-api-ci:${{ github.sha }}
